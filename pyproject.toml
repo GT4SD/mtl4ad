@@ -42,7 +42,7 @@ priority = "primary"
 python = "^3.10"
 absl-py = '^2.1.0'
 datasets = '^2.18.0'
-deepspeed = '0.13.1'  # to avoid serialization errors when saving checkpoints
+deepspeed = "0.14.4"  # to avoid serialization errors when saving checkpoints
 evaluate = '^0.4.1'
 loguru = '^0.7.2'
 mlflow = '^2.11.1'
@@ -53,12 +53,13 @@ rouge-score = '^0.1.2'
 tqdm = '^4.25.0'
 importlib-resources = "^6.3.1"
 pandas = "^2.2.1"
-transformers = "^4.39.3"
 sacrebleu = "^2.4.2"
 
 python-levenshtein = "0.25.1"
-trl = "^0.9.4"
 bitsandbytes = "^0.43.1"
+tokenizers = "^0.19.1"
+transformers = "^4.44.0"
+accelerate = "<0.30.0"
 [tool.poetry.dev-dependencies]
 jupyter = "^1.0.0"
 mypy = "^1.0.0"

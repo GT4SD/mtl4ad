@@ -2,10 +2,12 @@
 
 import logging
 from pathlib import Path
-from typing import Any, Dict, Optional, Union
+from typing import Any, Dict, Optional, Union, List
 
 from datasets import Dataset, DatasetDict, concatenate_datasets, load_dataset
 from transformers import PreTrainedTokenizer
+
+import multiprocessing as mp
 
 logging.basicConfig(
     level=logging.INFO,
@@ -14,6 +16,34 @@ logging.basicConfig(
 )
 logger = logging.getLogger(__name__)
 
+def load_dataset_from_folder(folder: Path) -> Dict[str, Optional[Dataset]]:
+    """Load train and validation datasets from a single folder.
+
+    Args:
+        folder: The folder to load the datasets from.
+
+    Returns:
+        A dictionary containing 'train' and 'validation' datasets.
+    """
+    datasets = {"train": None, "validation": None}
+
+    train_file = folder / "train.parquet"
+    valid_file = folder / "validation.parquet"
+
+    if train_file.exists():
+        train_dataset = load_dataset(
+            "parquet", data_files=str(train_file), split="train", num_proc=mp.cpu_count(), cache_dir="/projects/0/prjs1108/.cache"
+        )
+        datasets["train"] = train_dataset
+
+    if valid_file.exists():
+        valid_dataset = load_dataset(
+            "parquet", data_files=str(valid_file), split="train", num_proc=mp.cpu_count(), cache_dir="/projects/0/prjs1108/.cache"
+        )
+        datasets["validation"] = valid_dataset
+    
+
+    return datasets
 
 def load_dataset_from_folders(base_path: Union[str, Path]) -> DatasetDict:
     """Load and concatenate datasets from multiple folders.
@@ -24,32 +54,27 @@ def load_dataset_from_folders(base_path: Union[str, Path]) -> DatasetDict:
     Returns:
         The concatenated dataset with 'train' and 'validation' splits.
     """
-    all_train_datasets = []
-    all_valid_datasets = []
-
     base_path = Path(base_path) if isinstance(base_path, str) else base_path
-    for folder in base_path.iterdir():
-        if folder.is_dir():
-            train_file = folder / "train.parquet"
-            valid_file = folder / "validation.parquet"
 
-            if train_file.exists():
-                train_dataset = load_dataset(
-                    "parquet", data_files=str(train_file), split="train", num_proc=32
-                )
-                all_train_datasets.append(train_dataset)
+    folders = [folder for folder in base_path.iterdir() if folder.is_dir()]
 
-            if valid_file.exists():
-                valid_dataset = load_dataset(
-                    "parquet", data_files=str(valid_file), split="train", num_proc=32
-                )
-                all_valid_datasets.append(valid_dataset)
+    with mp.Pool(mp.cpu_count()) as pool:
+        results = pool.map(load_dataset_from_folder, folders)
+
+    all_train_datasets = [res["train"] for res in results if res["train"] is not None]
+    all_valid_datasets = [res["validation"] for res in results if res["validation"] is not None]
 
     train_dataset = concatenate_datasets(all_train_datasets) if all_train_datasets else None
     valid_dataset = concatenate_datasets(all_valid_datasets) if all_valid_datasets else None
 
     dataset = DatasetDict({"train": train_dataset, "validation": valid_dataset})
-
+    for entry in dataset:
+        try:  
+            dataset[entry] = dataset[entry].rename_column("target", "labels") 
+            dataset[entry] = dataset[entry].rename_column("source", "text")
+        except:
+            pass
+        
     return dataset
 
 
@@ -80,18 +105,19 @@ def preprocess(
         """
         formatted_prompts = [
             f"{source} \n\n {target}"
-            for source, target in zip(examples["source"], examples["target"])
+            for source, target in zip(examples["text"], examples["labels"])
         ]
         model_inputs = tokenizer(
             formatted_prompts,
             truncation=True,
             max_length=max_length,
             return_tensors=None,
+            padding="max_length"
         )
         model_inputs["labels"] = model_inputs["input_ids"].copy()
         return model_inputs
 
-    return dataset.map(process, batched=True)
+    return dataset.map(process, batched=True, num_proc=mp.cpu_count())
 
 
 def filter_dataset(dataset: DatasetDict, dataset_percentage: Optional[float]) -> DatasetDict:
@@ -145,3 +171,17 @@ def load_dataset_and_preprocess(config: Dict[str, Any], tokenizer) -> Dataset:
         logger.info("Done shuffling")
 
     return dataset
+
+def generate_formatted_prompts(examples) -> List[str]:
+    """Generate formatted prompts from examples.
+
+    Args:
+        examples: A dictionary with 'source' and 'target' lists.
+
+    Returns:
+        A list of formatted prompts.
+    """
+    return [
+        f"{source} \n\n {target}"
+        for source, target in zip(examples["text"], examples["labels"])
+    ]

@@ -1,0 +1,26 @@
+model_name: "ibm-granite/granite-7b-base"
+dataset_path: "src/mtl4ad/resources/train/dataset"
+per_device_train_batch_size: 2
+per_device_eval_batch_size: 2
+gradient_checkpointing: true
+gradient_accumulation_steps: 1
+experiment_name: test_no_deepspeed
+checkpoint_dir: "models"
+# deepspeed: "configs/deepspeed_config.json" #"configs/deepspeed_config.json"
+dataset_percentage: 0.2
+dataset_seed: 42
+shuffle: true
+enable_peft: true
+eval_steps: 4
+do_eval: true
+logging_steps: 5
+save_total_limit: 10
+save_steps: 5
+eval_strategy: "steps"
+num_train_epochs: 1
+# max_steps: 100
+report_to: "mlflow"
+max_seq_length: 512
+process_group_timeout_in_minutes: 50
+resume_from_checkpoint: "/home/ynanateukam/mtl4ad/models/test_no_deepspeed/checkpoint-15"
+# optim: "adamw_bnb_8bit"
