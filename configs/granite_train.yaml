@@ -8,13 +8,14 @@ experiment_name: full_train_no_deepspeed
 checkpoint_dir: "models"
 # deepspeed: "configs/deepspeed_config.json" #"configs/deepspeed_config.json"
 dataset_percentage: 100
+n_val_sample: 12000
 dataset_seed: 42
 shuffle: true
 enable_peft: true
-eval_steps: 5000
+eval_steps: 10000
 logging_steps: 100
-save_total_limit: 10
-save_steps: 50
+save_total_limit: 6
+save_steps: 1000
 eval_strategy: "steps"
 num_train_epochs: 1
 # max_steps: 100

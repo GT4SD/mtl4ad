@@ -156,7 +156,7 @@ def main() -> None:
 
     if "dataset_percentage" in config:
         logger.info("Sampling dataset...")
-        dataset = filter_dataset(dataset, config.get("dataset_percentage"))
+        dataset = filter_dataset(dataset, config.get("dataset_percentage"), config.get("n_val_sample"))
         for element in dataset:
             logger.info(f"Filtered size of {element}: {len(dataset[element])}")
 

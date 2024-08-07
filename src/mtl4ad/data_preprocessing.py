@@ -117,7 +117,7 @@ def preprocess(
     return dataset.map(process, batched=True, num_proc=mp.cpu_count())
 
 
-def filter_dataset(dataset: DatasetDict, dataset_percentage: Optional[float]) -> DatasetDict:
+def filter_dataset(dataset: DatasetDict, dataset_percentage: Optional[float], n_val_sample: Optional[int]) -> DatasetDict:
     """
     Filters the dataset based on the given percentage.
 
@@ -132,9 +132,13 @@ def filter_dataset(dataset: DatasetDict, dataset_percentage: Optional[float]) ->
         raise ValueError("dataset_percentage cannot be None")
 
     train_new_size = round(len(dataset["train"]) * dataset_percentage / 100)
-    val_new_size = round(len(dataset["validation"]) * dataset_percentage / 100)
     dataset["train"] = dataset["train"].select(range(train_new_size))
-    dataset["validation"] = dataset["validation"].select(range(val_new_size))
+    if not n_val_sample: 
+        val_new_size = round(len(dataset["validation"]) * dataset_percentage / 100)
+        dataset["validation"] = dataset["validation"].select(range(val_new_size))
+    else:
+        dataset["validation"] = dataset["validation"].shuffle(seed=42)
+        dataset["validation"] = dataset["validation"].take(n_val_sample)
     return dataset
 
 
