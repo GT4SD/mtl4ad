@@ -12,7 +12,7 @@ import torch.distributed as dist
 from transformers import DataCollatorForSeq2Seq
 from trl import SFTConfig, SFTTrainer  # type: ignore
 
-from mtl4ad.data_preprocessing import load_dataset_and_preprocess  # type: ignore
+from mtl4ad.data_preprocessing import load_dataset_and_preprocess, load_dataset_from_folders, filter_dataset, generate_formatted_prompts  # type: ignore
 from mtl4ad.model import load_model_and_tokenizer_peft  # type: ignore
 from mtl4ad.utils import (  # type: ignore
     PeftSavingCallback,
@@ -20,6 +20,8 @@ from mtl4ad.utils import (  # type: ignore
     format_name,
     load_config,
 )
+import multiprocessing as mp
+
 
 logging.basicConfig(
     level=logging.INFO,
@@ -43,6 +45,11 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--config", type=str, required=True, help="Path to the configuration file.")
     return parser.parse_args()
 
+def formatting_func(examples):
+    return [
+            f"{source} \n\n {target}"
+            for source, target in zip(examples["text"], examples["labels"])
+        ]
 
 def initialize_trainer(
     config,
@@ -87,10 +94,12 @@ def initialize_trainer(
         args=training_args,
         train_dataset=dataset["train"],
         eval_dataset=dataset["validation"],
-        data_collator=collator,
+        # data_collator=collator,
         callbacks=[PeftSavingCallback()] if enable_peft else None,
         peft_config=peft_config,
-        max_seq_length=max_seq_length
+        max_seq_length=max_seq_length,
+        formatting_func=generate_formatted_prompts,
+        dataset_num_proc=mp.cpu_count()
     )
 
 
@@ -130,10 +139,41 @@ def main() -> None:
                 "Initializing the process group from the environment was not possible!"
             )
     
-    # logger.info(f"Rank: {torch.distributed.get_rank()}")
+    logger.info(f"Rank: {torch.distributed.get_rank()}")
+    local_rank = torch.distributed.get_rank()
+    dataset = load_dataset_from_folders(config["dataset_path"])
+    if local_rank > 0:
+        logger.info(
+            f"rank={local_rank} "
+            "Waiting for main process to perform the mapping"
+        )
+        torch.distributed.barrier()
+    
     # torch.cuda.set_device(torch.distributed.get_rank())
+    
+    for element in dataset:
+        logger.info(f"Original size of {element}: {len(dataset[element])}")
+
+    if "dataset_percentage" in config:
+        logger.info("Sampling dataset...")
+        dataset = filter_dataset(dataset, config.get("dataset_percentage"))
+        for element in dataset:
+            logger.info(f"Filtered size of {element}: {len(dataset[element])}")
+
+    if "shuffle" in config:
+        logger.info("Shuffling dataset...")
+        dataset = dataset.shuffle(seed=config.get("dataset_seed", 42))
+        logger.info("Done shuffling")
+
+    if local_rank == 0:
+        logger.info(f"rank={local_rank} Loading results from main process")
+        if IS_CUDA_AVAILABLE:
+            torch.distributed.barrier()
+
     model, tokenizer, peft_config = load_model_and_tokenizer_peft(config, enable_peft)
-    dataset = load_dataset_and_preprocess(config, tokenizer)
+
+    # dataset = load_dataset_and_preprocess(config, tokenizer)
+    
     clean_config = extract_valid_training_arguments(config)
 
     trainer = initialize_trainer(

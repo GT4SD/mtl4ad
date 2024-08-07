@@ -69,12 +69,9 @@ def load_dataset_from_folders(base_path: Union[str, Path]) -> DatasetDict:
 
     dataset = DatasetDict({"train": train_dataset, "validation": valid_dataset})
     for entry in dataset:
-        try:  
-            dataset[entry] = dataset[entry].rename_column("target", "labels") 
-            dataset[entry] = dataset[entry].rename_column("source", "text")
-        except:
-            pass
-        
+        dataset[entry] = dataset[entry].rename_column("target", "labels") 
+        dataset[entry] = dataset[entry].rename_column("source", "text")
+
     return dataset
 
 

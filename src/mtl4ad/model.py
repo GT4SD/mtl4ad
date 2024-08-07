@@ -6,6 +6,8 @@ import torch
 from peft import LoraConfig, get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
 import logging
+from accelerate import PartialState
+
 
 from mtl4ad.utils import find_all_linear_names, is_bf16_available  # type: ignore
 
@@ -41,6 +43,8 @@ def load_model_and_tokenizer_peft(
         model_name, torch_dtype=torch.bfloat16 if is_bf16_available() else torch.float32,
         # use_flash_attention_2=True,
         quantization_config=bnb_config,
+        # load_in_4bit=True,
+        device_map={"": PartialState().process_index}
     )
     model.config.use_cache = False
 
