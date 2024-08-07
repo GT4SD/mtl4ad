@@ -1,16 +1,23 @@
 """Model and Tokenizer Utilities"""
 
-from typing import Any, Optional, Tuple
+from typing import Any, Optional, Tuple, Dict
 
 import torch
-from peft import LoraConfig
-from transformers import AutoModelForCausalLM, AutoTokenizer
+from peft import LoraConfig, get_peft_model
+from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
+import logging
 
 from mtl4ad.utils import find_all_linear_names, is_bf16_available  # type: ignore
 
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s - %(name)s - %(levelname)s - %(message)s",
+    datefmt="%Y-%m-%d %H:%M:%S",
+)
+logger = logging.getLogger(__name__)
 
 def load_model_and_tokenizer_peft(
-    model_name: str, use_peft: bool = False
+    config: Dict[str, Any], use_peft: bool = False
 ) -> Tuple[AutoModelForCausalLM, AutoTokenizer, Optional[Any]]:
     """
     Loads the model and tokenizer.
@@ -22,19 +29,37 @@ def load_model_and_tokenizer_peft(
     Returns:
         A tuple containing the loaded model and tokenizer, and optionally the PEFT config.
     """
+    model_name=config["model_name"]
+    bnb_config = BitsAndBytesConfig(
+        load_in_4bit=True,
+        bnb_4bit_use_double_quant=True,
+        bnb_4bit_quant_type="nf4",
+        bnb_4bit_compute_dtype=torch.bfloat16
+    )
+
     model = AutoModelForCausalLM.from_pretrained(
-        model_name, torch_dtype=torch.bfloat16 if is_bf16_available() else torch.float32
+        model_name, torch_dtype=torch.bfloat16 if is_bf16_available() else torch.float32,
+        # use_flash_attention_2=True,
+        quantization_config=bnb_config,
     )
     model.config.use_cache = False
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
+    tokenizer.padding_side = 'right'
     tokenizer.add_eos_token = True
     tokenizer.pad_token = tokenizer.eos_token
     tokenizer.pad_token_id = tokenizer.eos_token_id
+    max_length = (
+    min(tokenizer.model_max_length, config["max_seq_length"])
+    if "max_seq_length" in config and config["max_seq_length"] is not None
+    else tokenizer.model_max_length
+)
+    tokenizer.model_max_length = max_length
 
     peft_config = None
     if use_peft:
-        peft_config = enable_peft(model)
+        model, peft_config = enable_peft(model)
+        logger.info("Peft enabled")
 
     return model, tokenizer, peft_config
 
@@ -70,10 +95,9 @@ def enable_peft(model) -> torch.nn.Module:
         task_type="CAUSAL_LM",
         target_modules=target_modules,
     )
-
-    return peft_config
-    # model = get_peft_model(model, peft_config)
-    # return model
+ 
+    model = get_peft_model(model, peft_config)
+    return model, peft_config
 
 
 def prepare_model_for_training(

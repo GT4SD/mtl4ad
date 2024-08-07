@@ -3,6 +3,8 @@
 import argparse
 import logging
 from pathlib import Path
+import json
+from datetime import timedelta
 
 import mlflow  # type: ignore
 import torch
@@ -49,8 +51,9 @@ def initialize_trainer(
     dataset,
     experiment_name,
     output_dir,
+    max_seq_length,
     enable_peft=False,
-    peft_config=None,
+    peft_config=None
 ) -> SFTTrainer:
     """
     Initializes the Trainer for model training.
@@ -73,6 +76,8 @@ def initialize_trainer(
         output_dir=str(output_dir),
         run_name=experiment_name,
         bf16=IS_BF16_AVAILABLE,
+        ddp_find_unused_parameters=False,
+        gradient_checkpointing_kwargs={"use_reentrant":False},
         **config,
     )
 
@@ -85,6 +90,7 @@ def initialize_trainer(
         data_collator=collator,
         callbacks=[PeftSavingCallback()] if enable_peft else None,
         peft_config=peft_config,
+        max_seq_length=max_seq_length
     )
 
 
@@ -110,22 +116,46 @@ def main() -> None:
     output_dir = str(Path(config.get("checkpoint_dir", "tmp")).joinpath(experiment_name))
 
     enable_peft = config.get("enable_peft", False)
-    model, tokenizer, peft_config = load_model_and_tokenizer_peft(config["model_name"], enable_peft)
+    if not torch.distributed.is_initialized():
+        try:
+            torch.distributed.init_process_group(
+                backend="nccl" if IS_CUDA_AVAILABLE else "gloo",
+                timeout=timedelta(
+                    minutes=float(config.get("process_group_timeout_in_minutes", 30))
+                ),
+            )
+            logger.info("Process group has been initialized successfully")
+        except ValueError:
+            logger.warning(
+                "Initializing the process group from the environment was not possible!"
+            )
+    
+    # logger.info(f"Rank: {torch.distributed.get_rank()}")
+    # torch.cuda.set_device(torch.distributed.get_rank())
+    model, tokenizer, peft_config = load_model_and_tokenizer_peft(config, enable_peft)
     dataset = load_dataset_and_preprocess(config, tokenizer)
-    config = extract_valid_training_arguments(config)
+    clean_config = extract_valid_training_arguments(config)
 
     trainer = initialize_trainer(
-        config, model, tokenizer, dataset, experiment_name, output_dir, enable_peft, peft_config
+        clean_config, model, tokenizer, dataset, experiment_name, output_dir, config.get("max_seq_length", tokenizer.model_max_length), enable_peft, peft_config
     )
-
     is_mlflow_available = config.get("report_to") == "mlflow"
+    config_json = json.dumps(config)
 
-    if is_mlflow_available and (not IS_CUDA_AVAILABLE or torch.distributed.get_rank() == 0):
-        mlflow.set_experiment(full_experiment_name)
-        mlflow.start_run()
-        mlflow.set_tag("mlflow.runName", experiment_name)
-        mlflow.pytorch.autolog()
-    trainer.train()
+    # if is_mlflow_available and (not IS_CUDA_AVAILABLE or torch.distributed.get_rank() == 0):
+    #     mlflow.set_experiment(full_experiment_name)
+    #     mlflow.start_run()
+    #     mlflow.set_tag("mlflow.runName", experiment_name)
+    #     mlflow.set_tag("configs", config_json)
+    #     mlflow.pytorch.autolog()
+    resume_checkpoint = config.get("resume_from_checkpoint", None)
+    if resume_checkpoint:
+        logger.info(f"Resuming from Checkpoint: {resume_checkpoint}")
+        trainer.train(resume_from_checkpoint=resume_checkpoint)
+    else:
+        trainer.place_model_on_device = True
+        trainer.train()
+        
     trainer.save_model(str(Path(output_dir).joinpath("last_model")))
 
     dist.destroy_process_group()
