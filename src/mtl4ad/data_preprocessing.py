@@ -1,13 +1,12 @@
 """Dataset Utilities: Loading, Preprocessing, and Filtering"""
 
 import logging
+import multiprocessing as mp
 from pathlib import Path
-from typing import Any, Dict, Optional, Union, List
+from typing import Any, Dict, List, Optional, Union
 
 from datasets import Dataset, DatasetDict, concatenate_datasets, load_dataset
 from transformers import PreTrainedTokenizer
-
-import multiprocessing as mp
 
 logging.basicConfig(
     level=logging.INFO,
@@ -69,7 +68,7 @@ def load_dataset_from_folders(base_path: Union[str, Path]) -> DatasetDict:
 
     dataset = DatasetDict({"train": train_dataset, "validation": valid_dataset})
     for entry in dataset:
-        dataset[entry] = dataset[entry].rename_column("target", "labels") 
+        dataset[entry] = dataset[entry].rename_column("target", "labels")
         dataset[entry] = dataset[entry].rename_column("source", "text")
 
     return dataset
@@ -133,7 +132,7 @@ def filter_dataset(dataset: DatasetDict, dataset_percentage: Optional[float], n_
 
     train_new_size = round(len(dataset["train"]) * dataset_percentage / 100)
     dataset["train"] = dataset["train"].select(range(train_new_size))
-    if not n_val_sample: 
+    if not n_val_sample:
         val_new_size = round(len(dataset["validation"]) * dataset_percentage / 100)
         dataset["validation"] = dataset["validation"].select(range(val_new_size))
     else:
@@ -141,37 +140,6 @@ def filter_dataset(dataset: DatasetDict, dataset_percentage: Optional[float], n_
         dataset["validation"] = dataset["validation"].take(n_val_sample)
     return dataset
 
-
-def load_dataset_and_preprocess(config: Dict[str, Any], tokenizer) -> Dataset:
-    """
-    Loads and preprocesses the dataset according to the given configuration.
-
-    Args:
-        config: The configuration object containing dataset and preprocessing parameters.
-        tokenizer: The tokenizer to be used for preprocessing the dataset.
-
-    Returns:
-        The preprocessed dataset.
-    """
-    logger.info("Loading dataset...")
-    dataset = load_dataset_from_folders(config["dataset_path"])
-    for element in dataset:
-        logger.info(f"Original size of {element}: {len(dataset[element])}")
-
-    if "dataset_percentage" in config:
-        logger.info("Sampling dataset...")
-        dataset = filter_dataset(dataset, config.get("dataset_percentage"))
-        for element in dataset:
-            logger.info(f"Filtered size of {element}: {len(dataset[element])}")
-
-    dataset = preprocess(dataset, tokenizer, config.get("model_max_length", None))
-
-    if "shuffle" in config:
-        logger.info("Shuffling dataset...")
-        dataset = dataset.shuffle(seed=config.get("dataset_seed", 42))
-        logger.info("Done shuffling")
-
-    return dataset
 
 def generate_formatted_prompts(examples) -> List[str]:
     """Generate formatted prompts from examples.

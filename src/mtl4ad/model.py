@@ -1,15 +1,14 @@
 """Model and Tokenizer Utilities"""
 
-from typing import Any, Optional, Tuple, Dict
+import logging
+from typing import Any, Dict, Optional, Tuple
 
 import torch
+from accelerate import PartialState     # type: ignore
 from peft import LoraConfig, get_peft_model
 from transformers import AutoModelForCausalLM, AutoTokenizer, BitsAndBytesConfig
-import logging
-from accelerate import PartialState
 
-
-from mtl4ad.utils import find_all_linear_names, is_bf16_available  # type: ignore
+from mtl4ad.utils import find_all_linear_names, is_bf16_available, is_cuda_available  # type: ignore
 
 logging.basicConfig(
     level=logging.INFO,
@@ -39,13 +38,19 @@ def load_model_and_tokenizer_peft(
         bnb_4bit_compute_dtype=torch.bfloat16
     )
 
-    model = AutoModelForCausalLM.from_pretrained(
-        model_name, torch_dtype=torch.bfloat16 if is_bf16_available() else torch.float32,
-        # use_flash_attention_2=True,
-        quantization_config=bnb_config,
-        # load_in_4bit=True,
-        device_map={"": PartialState().process_index}
-    )
+    if is_cuda_available():
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name, torch_dtype=torch.bfloat16 if is_bf16_available() else torch.float32,
+            # use_flash_attention_2=True,
+            quantization_config=bnb_config,
+            # load_in_4bit=True,
+            device_map={"": PartialState().process_index}
+        )
+    else:
+        model = AutoModelForCausalLM.from_pretrained(
+            model_name, torch_dtype=torch.bfloat16 if is_bf16_available() else torch.float32
+        )
+        
     model.config.use_cache = False
 
     tokenizer = AutoTokenizer.from_pretrained(model_name)
@@ -68,7 +73,7 @@ def load_model_and_tokenizer_peft(
     return model, tokenizer, peft_config
 
 
-def enable_peft(model) -> torch.nn.Module:
+def enable_peft(model) -> tuple[Any, LoraConfig]:
     """
     Enables PEFT (Lora) for the model.
 
@@ -79,16 +84,7 @@ def enable_peft(model) -> torch.nn.Module:
         The model with PEFT enabled.
     """
     model.enable_input_require_grads()
-    # target_modules = [
-    #     "q_proj",
-    #     "k_proj",
-    #     "v_proj",
-    #     "o_proj",
-    #     "gate_proj",
-    #     "up_proj",
-    #     "down_proj",
-    #     "lm_head",
-    # ]
+
     target_modules = find_all_linear_names(model)
 
     peft_config = LoraConfig(
