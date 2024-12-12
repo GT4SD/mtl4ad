@@ -1,16 +1,22 @@
 """Model Training Script"""
 
 import argparse
+import json
 import logging
+import multiprocessing as mp
+from datetime import timedelta
 from pathlib import Path
 
 import mlflow  # type: ignore
 import torch
 import torch.distributed as dist
-from transformers import DataCollatorForSeq2Seq
 from trl import SFTConfig, SFTTrainer  # type: ignore
 
-from mtl4ad.data_preprocessing import load_dataset_and_preprocess  # type: ignore
+from mtl4ad.data_preprocessing import (  # type: ignore
+    filter_dataset,
+    generate_formatted_prompts,
+    load_dataset_from_folders,
+)
 from mtl4ad.model import load_model_and_tokenizer_peft  # type: ignore
 from mtl4ad.utils import (  # type: ignore
     PeftSavingCallback,
@@ -41,6 +47,20 @@ def parse_arguments() -> argparse.Namespace:
     parser.add_argument("--config", type=str, required=True, help="Path to the configuration file.")
     return parser.parse_args()
 
+def formatting_func(examples):
+    """
+    Function to format each example in the dataset.
+
+    Args:
+        examples: A batch of examples from the dataset.
+
+    Returns:
+        A list with formated examples.
+    """
+    return [
+            f"{source} \n\n {target}"
+            for source, target in zip(examples["text"], examples["labels"])
+        ]
 
 def initialize_trainer(
     config,
@@ -49,8 +69,9 @@ def initialize_trainer(
     dataset,
     experiment_name,
     output_dir,
+    max_seq_length,
     enable_peft=False,
-    peft_config=None,
+    peft_config=None
 ) -> SFTTrainer:
     """
     Initializes the Trainer for model training.
@@ -67,12 +88,13 @@ def initialize_trainer(
     Returns:
         The initialized Trainer object.
     """
-    collator = DataCollatorForSeq2Seq(tokenizer=tokenizer, model=model)
 
     training_args = SFTConfig(
         output_dir=str(output_dir),
         run_name=experiment_name,
         bf16=IS_BF16_AVAILABLE,
+        ddp_find_unused_parameters=False,
+        gradient_checkpointing_kwargs={"use_reentrant":False},
         **config,
     )
 
@@ -82,9 +104,12 @@ def initialize_trainer(
         args=training_args,
         train_dataset=dataset["train"],
         eval_dataset=dataset["validation"],
-        data_collator=collator,
+        # data_collator=collator,
         callbacks=[PeftSavingCallback()] if enable_peft else None,
         peft_config=peft_config,
+        max_seq_length=max_seq_length,
+        formatting_func=generate_formatted_prompts,
+        dataset_num_proc=mp.cpu_count()
     )
 
 
@@ -110,22 +135,73 @@ def main() -> None:
     output_dir = str(Path(config.get("checkpoint_dir", "tmp")).joinpath(experiment_name))
 
     enable_peft = config.get("enable_peft", False)
-    model, tokenizer, peft_config = load_model_and_tokenizer_peft(config["model_name"], enable_peft)
-    dataset = load_dataset_and_preprocess(config, tokenizer)
-    config = extract_valid_training_arguments(config)
+    if not torch.distributed.is_initialized():
+        try:
+            torch.distributed.init_process_group(
+                backend="nccl" if IS_CUDA_AVAILABLE else "gloo",
+                timeout=timedelta(
+                    minutes=float(config.get("process_group_timeout_in_minutes", 30))
+                ),
+            )
+            logger.info("Process group has been initialized successfully")
+        except ValueError:
+            logger.warning(
+                "Initializing the process group from the environment was not possible!"
+            )
+    
+    logger.info(f"Rank: {torch.distributed.get_rank()}")
+    local_rank = torch.distributed.get_rank()
+    dataset = load_dataset_from_folders(config["dataset_path"])
+    if local_rank > 0:
+        logger.info(
+            f"rank={local_rank} "
+            "Waiting for main process to perform the mapping"
+        )
+        torch.distributed.barrier()
+        
+    for element in dataset:
+        logger.info(f"Original size of {element}: {len(dataset[element])}")
+
+    if "dataset_percentage" in config:
+        logger.info("Sampling dataset...")
+        dataset = filter_dataset(dataset, config.get("dataset_percentage"), config.get("n_val_sample"))
+        for element in dataset:
+            logger.info(f"Filtered size of {element}: {len(dataset[element])}")
+
+    if "shuffle" in config:
+        logger.info("Shuffling dataset...")
+        dataset = dataset.shuffle(seed=config.get("dataset_seed", 42))
+        logger.info("Done shuffling")
+
+    if local_rank == 0:
+        logger.info(f"rank={local_rank} Loading results from main process")
+        if IS_CUDA_AVAILABLE:
+            torch.distributed.barrier()
+
+    model, tokenizer, peft_config = load_model_and_tokenizer_peft(config, enable_peft)
+    
+    clean_config = extract_valid_training_arguments(config)
 
     trainer = initialize_trainer(
-        config, model, tokenizer, dataset, experiment_name, output_dir, enable_peft, peft_config
+        clean_config, model, tokenizer, dataset, experiment_name, output_dir, config.get("max_seq_length", tokenizer.model_max_length), enable_peft, peft_config
     )
-
     is_mlflow_available = config.get("report_to") == "mlflow"
+    config_json = json.dumps(config)
 
     if is_mlflow_available and (not IS_CUDA_AVAILABLE or torch.distributed.get_rank() == 0):
         mlflow.set_experiment(full_experiment_name)
         mlflow.start_run()
         mlflow.set_tag("mlflow.runName", experiment_name)
+        mlflow.set_tag("configs", config_json)
         mlflow.pytorch.autolog()
-    trainer.train()
+    resume_checkpoint = config.get("resume_from_checkpoint", None)
+    if resume_checkpoint:
+        logger.info(f"Resuming from Checkpoint: {resume_checkpoint}")
+        trainer.train(resume_from_checkpoint=resume_checkpoint)
+    else:
+        trainer.place_model_on_device = True
+        trainer.train()
+        
     trainer.save_model(str(Path(output_dir).joinpath("last_model")))
 
     dist.destroy_process_group()
